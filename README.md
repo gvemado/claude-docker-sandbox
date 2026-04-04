@@ -11,6 +11,7 @@ This repo contains a small Docker sandbox launcher for GitHub Copilot CLI.
 - Mounts the worktree and the repo's common git directory at the same absolute paths inside the container so git commands keep working
 - Bind-mounts `~/.copilot` into `/home/agent/.copilot` so your Copilot settings are shared, not baked into the image
 - Mounts your host `~/.ssh` read-only and stages `id_rsa` into `/home/agent/.ssh` for GitHub SSH access inside the container
+- Installs the OpenSSH client so Git can use your staged SSH key for fetch/push operations
 - Mounts your host `~/.gnupg` read-only and stages it into `/home/agent/.gnupg` so GPG signing can use your existing keys
 - Exposes both `uv` and `uvx` inside the container for tools like `uvx mcp-atlassian`
 - Starts `copilot --yolo` inside the container

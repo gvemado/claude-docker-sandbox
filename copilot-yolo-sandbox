@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+show_help() {
+  cat <<'EOF'
+Usage: copilot-yolo-sandbox [--branch <name>] [--rebuild] [-- copilot args...]
+
+Starts GitHub Copilot CLI in a Docker sandbox backed by a host-side git worktree.
+
+Options:
+  -b, --branch <name>  Branch to open in the sandbox worktree
+      --rebuild        Rebuild the sandbox image before starting
+  -h, --help           Show this help text
+
+Examples:
+  copilot-yolo-sandbox
+  copilot-yolo-sandbox --branch feature/refactor
+  copilot-yolo-sandbox --branch fix/login -- --continue
+EOF
+}
+
+hash_string() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,12)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print substr($1,1,12)}'
+  else
+    printf '%s' "$1" | cksum | awk '{print $1}'
+  fi
+}
+
+hash_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print substr($1,1,12)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print substr($1,1,12)}'
+  else
+    cksum "$1" | awk '{print $1}'
+  fi
+}
+
+slugify() {
+  local value
+  value="$(
+    printf '%s' "$1" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//'
+  )"
+
+  printf '%s' "${value:-item}"
+}
+
+script_dir="$(
+  cd "$(dirname "${BASH_SOURCE[0]}")"
+  pwd
+)"
+dockerfile_path="$script_dir/Dockerfile"
+entrypoint_path="$script_dir/container-entrypoint.sh"
+project_dir="$PWD"
+
+branch="${COPILOT_SANDBOX_BRANCH:-}"
+rebuild=0
+copilot_args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -b|--branch)
+      if [[ $# -lt 2 ]]; then
+        echo "--branch requires a branch name" >&2
+        exit 1
+      fi
+      branch="$2"
+      shift 2
+      ;;
+    --rebuild)
+      rebuild=1
+      shift
+      ;;
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    --)
+      shift
+      copilot_args+=("$@")
+      break
+      ;;
+    *)
+      copilot_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ! -f "$dockerfile_path" ]]; then
+  echo "Dockerfile not found at $dockerfile_path" >&2
+  exit 1
+fi
+
+if [[ ! -f "$entrypoint_path" ]]; then
+  echo "Entrypoint script not found at $entrypoint_path" >&2
+  exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker is required but was not found in PATH" >&2
+  exit 1
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required but was not found in PATH" >&2
+  exit 1
+fi
+
+mkdir -p "$HOME/.copilot"
+
+if ! current_worktree_root="$(git -C "$project_dir" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)"; then
+  echo "Run this script from inside a git repository." >&2
+  exit 1
+fi
+
+repo_root="$current_worktree_root"
+git_common_dir="$(git -C "$project_dir" rev-parse --path-format=absolute --git-common-dir)"
+default_branch="$(git -C "$project_dir" branch --show-current 2>/dev/null || true)"
+repo_label_root="$repo_root"
+
+if [[ "$(basename "$git_common_dir")" == ".git" ]]; then
+  repo_label_root="$(dirname "$git_common_dir")"
+fi
+
+if [[ -z "$branch" ]]; then
+  if [[ -t 0 && -t 1 ]]; then
+    if [[ -n "$default_branch" ]]; then
+      read -r -p "Branch name [$default_branch]: " branch
+      branch="${branch:-$default_branch}"
+    else
+      read -r -p "Branch name: " branch
+    fi
+  else
+    echo "Branch name required in non-interactive mode. Use --branch <name>." >&2
+    exit 1
+  fi
+fi
+
+if [[ -z "$branch" ]]; then
+  echo "Branch name cannot be empty." >&2
+  exit 1
+fi
+
+if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+  echo "Invalid branch name: $branch" >&2
+  exit 1
+fi
+
+find_existing_worktree_for_branch() {
+  local target_ref="$1"
+  local worktree_path=""
+  local branch_ref=""
+  local line=""
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -z "$line" ]]; then
+      if [[ "$branch_ref" == "$target_ref" && -n "$worktree_path" ]]; then
+        printf '%s\n' "$worktree_path"
+        return 0
+      fi
+
+      worktree_path=""
+      branch_ref=""
+      continue
+    fi
+
+    case "$line" in
+      worktree\ *)
+        worktree_path="${line#worktree }"
+        ;;
+      branch\ *)
+        branch_ref="${line#branch }"
+        ;;
+    esac
+  done < <(git -C "$repo_root" worktree list --porcelain && printf '\n')
+
+  return 1
+}
+
+repo_key="$(hash_string "$git_common_dir")"
+repo_slug="$(slugify "$(basename "$repo_label_root")")"
+branch_key="$(hash_string "$branch")"
+branch_slug="$(slugify "$branch")"
+worktree_root="${COPILOT_SANDBOX_WORKTREE_ROOT:-$HOME/.local/share/copilot-yolo/worktrees}"
+worktree_path="${worktree_root}/${repo_slug}-${repo_key}/${branch_slug}-${branch_key}"
+
+if existing_worktree="$(find_existing_worktree_for_branch "refs/heads/$branch")"; then
+  worktree_path="$existing_worktree"
+  echo "Reusing existing worktree for $branch at $worktree_path"
+else
+  mkdir -p "$(dirname "$worktree_path")"
+
+  if [[ -e "$worktree_path" ]]; then
+    echo "Worktree path already exists and is not registered: $worktree_path" >&2
+    exit 1
+  fi
+
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    echo "Creating worktree for existing branch $branch at $worktree_path"
+    git -C "$repo_root" worktree add "$worktree_path" "$branch"
+  else
+    echo "Creating new branch $branch in worktree $worktree_path"
+    git -C "$repo_root" worktree add -b "$branch" "$worktree_path"
+  fi
+fi
+
+relative_subdir=""
+if [[ "$project_dir" != "$current_worktree_root" ]]; then
+  relative_subdir="${project_dir#"$current_worktree_root"/}"
+fi
+
+container_workdir="$worktree_path"
+if [[ -n "$relative_subdir" ]]; then
+  if [[ -d "$worktree_path/$relative_subdir" ]]; then
+    container_workdir="$worktree_path/$relative_subdir"
+  else
+    echo "Relative path $relative_subdir does not exist in $branch; starting at worktree root."
+  fi
+fi
+
+image_inputs_hash="$(
+  hash_string "$(hash_file "$dockerfile_path") $(hash_file "$entrypoint_path")"
+)"
+image_tag="${COPILOT_SANDBOX_IMAGE:-copilot-yolo-base:${image_inputs_hash}}"
+
+if [[ "$rebuild" -eq 1 ]] || ! docker image inspect "$image_tag" >/dev/null 2>&1; then
+  echo "Building sandbox image $image_tag..."
+  docker build -f "$dockerfile_path" -t "$image_tag" "$script_dir"
+fi
+
+echo "Starting Copilot in yolo mode for branch $branch..."
+docker_run_args=(
+  --rm
+  --init
+  --workdir "$container_workdir"
+  -e "TERM=${TERM:-xterm-256color}"
+  -v "$HOME/.copilot:/home/agent/.copilot"
+  -v "$worktree_path:$worktree_path"
+  -v "$git_common_dir:$git_common_dir"
+)
+
+if [[ -d "$HOME/.ssh" ]]; then
+  docker_run_args+=(-v "$HOME/.ssh:/run/copilot-host-ssh:ro")
+fi
+
+if [[ -d "$HOME/.gnupg" ]]; then
+  docker_run_args+=(-v "$HOME/.gnupg:/run/copilot-host-gnupg:ro")
+fi
+
+if [[ -t 0 && -t 1 ]]; then
+  docker_run_args=(-it "${docker_run_args[@]}")
+else
+  docker_run_args=(-i "${docker_run_args[@]}")
+fi
+
+copilot_cmd=(copilot --yolo)
+if ((${#copilot_args[@]})); then
+  copilot_cmd+=("${copilot_args[@]}")
+fi
+
+exec docker run "${docker_run_args[@]}" \
+  "$image_tag" \
+  "${copilot_cmd[@]}"

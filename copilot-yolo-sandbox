@@ -40,6 +40,33 @@ hash_file() {
   fi
 }
 
+cleanup_worktree() {
+  if [[ -z "${managed_worktree_path:-}" ]] || [[ -z "${repo_root:-}" ]]; then
+    return
+  fi
+
+  if ! git -C "$repo_root" worktree list --porcelain | grep -Fq "worktree $managed_worktree_path"; then
+    return
+  fi
+
+  if git -C "$repo_root" worktree remove "$managed_worktree_path" >/dev/null 2>&1; then
+    echo "Removed worktree $managed_worktree_path"
+  else
+    local worktree_status=""
+    if [[ -d "$managed_worktree_path" ]]; then
+      worktree_status="$(git -C "$managed_worktree_path" status --porcelain --untracked-files=all 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$worktree_status" ]]; then
+      echo "Preserving worktree $managed_worktree_path because it has uncommitted changes." >&2
+    else
+      echo "Could not remove worktree $managed_worktree_path automatically." >&2
+    fi
+  fi
+
+  git -C "$repo_root" worktree prune >/dev/null 2>&1 || true
+}
+
 slugify() {
   local value
   value="$(
@@ -62,6 +89,10 @@ project_dir="$PWD"
 branch="${COPILOT_SANDBOX_BRANCH:-}"
 rebuild=0
 copilot_args=()
+managed_worktree_path=""
+container_label_key="com.copilot-sandbox.worktree-path"
+
+trap cleanup_worktree EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -184,6 +215,10 @@ find_existing_worktree_for_branch() {
   return 1
 }
 
+find_running_container_for_worktree() {
+  docker ps -q --filter "label=${container_label_key}=$1"
+}
+
 repo_key="$(hash_string "$git_common_dir")"
 repo_slug="$(slugify "$(basename "$repo_label_root")")"
 branch_key="$(hash_string "$branch")"
@@ -193,6 +228,12 @@ worktree_path="${worktree_root}/${repo_slug}-${repo_key}/${branch_slug}-${branch
 
 if existing_worktree="$(find_existing_worktree_for_branch "refs/heads/$branch")"; then
   worktree_path="$existing_worktree"
+
+  if [[ -n "$(find_running_container_for_worktree "$worktree_path")" ]]; then
+    echo "Branch $branch is already open in another sandbox session at $worktree_path." >&2
+    exit 1
+  fi
+
   echo "Reusing existing worktree for $branch at $worktree_path"
 else
   mkdir -p "$(dirname "$worktree_path")"
@@ -210,6 +251,13 @@ else
     git -C "$repo_root" worktree add -b "$branch" "$worktree_path"
   fi
 fi
+
+registered_worktree="$(find_existing_worktree_for_branch "refs/heads/$branch" || true)"
+if [[ -n "$registered_worktree" ]]; then
+  worktree_path="$registered_worktree"
+fi
+
+managed_worktree_path="$worktree_path"
 
 relative_subdir=""
 if [[ "$project_dir" != "$current_worktree_root" ]]; then
@@ -239,6 +287,7 @@ echo "Starting Copilot in yolo mode for branch $branch..."
 docker_run_args=(
   --rm
   --init
+  --label "${container_label_key}=${worktree_path}"
   --workdir "$container_workdir"
   -e "TERM=${TERM:-xterm-256color}"
   -v "$HOME/.copilot:/home/agent/.copilot"
@@ -265,6 +314,11 @@ if ((${#copilot_args[@]})); then
   copilot_cmd+=("${copilot_args[@]}")
 fi
 
-exec docker run "${docker_run_args[@]}" \
+set +e
+docker run "${docker_run_args[@]}" \
   "$image_tag" \
   "${copilot_cmd[@]}"
+run_status=$?
+set -e
+
+exit "$run_status"

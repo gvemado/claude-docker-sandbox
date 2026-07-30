@@ -11,6 +11,7 @@ This repo contains a small Docker sandbox launcher for GitHub Copilot CLI.
 - Mounts the worktree and the repo's common git directory at the same absolute paths inside the container so git commands keep working
 - Bind-mounts `~/.copilot` into `/home/agent/.copilot` so your Copilot settings are shared, not baked into the image
 - Mounts your host `~/.ssh` read-only and stages `id_rsa` into `/home/agent/.ssh` for GitHub SSH access inside the container
+- Forwards your host `SSH_AUTH_SOCK` through a container-local relay socket so `ssh-add` and Git can talk to your host SSH agent
 - Installs the OpenSSH client so Git can use your staged SSH key for fetch/push operations
 - Mounts your host `~/.gnupg` read-only and stages it into `/home/agent/.gnupg` so GPG signing can use your existing keys
 - Exposes both `uv` and `uvx` inside the container for tools like `uvx mcp-atlassian`
@@ -57,5 +58,6 @@ copilot-yolo-sandbox --branch feature/my-task -- --continue
 - When the container exits, the launcher removes the managed worktree automatically if it is clean. If it still has uncommitted changes, the worktree is left in place to avoid losing work.
 - The image is rebuilt only when it does not exist yet, or when you pass `--rebuild`.
 - The launcher requires that you run it inside a git repository.
+- SSH agent forwarding works when your host shell already has a live `SSH_AUTH_SOCK`.
 - `~/.copilot` is mounted from your host machine, so login state and settings are reused.
 - Set `COPILOT_SANDBOX_IMAGE` if you want to override the generated image tag.

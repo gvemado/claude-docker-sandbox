@@ -299,6 +299,13 @@ if [[ -d "$HOME/.ssh" ]]; then
   docker_run_args+=(-v "$HOME/.ssh:/run/copilot-host-ssh:ro")
 fi
 
+if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
+  docker_run_args+=(
+    -e "COPILOT_HOST_SSH_AUTH_SOCK=/run/copilot-host-ssh-agent.sock"
+    -v "${SSH_AUTH_SOCK}:/run/copilot-host-ssh-agent.sock"
+  )
+fi
+
 if [[ -d "$HOME/.gnupg" ]]; then
   docker_run_args+=(-v "$HOME/.gnupg:/run/copilot-host-gnupg:ro")
 fi

@@ -21,11 +21,16 @@ RUN mkdir -p /tmp/mysql-mcp \
     && /usr/local/bin/mysql-mcp-server --version
 
 # Install AWS DocumentDB MCP server
+# Install AWS DocumentDB MCP server
+
+USER agent
 RUN uv tool install 'awslabs.documentdb-mcp-server>=1.0.12' \
-    && /root/.local/bin/awslabs.documentdb-mcp-server --help
+    && /home/agent/.local/bin/awslabs.documentdb-mcp-server --help
+USER root
 
 # AWS DocumentDB TLS certificate
 COPY packages/global-bundle.pem /etc/ssl/certs/global-bundle.pem
+RUN chmod 644 /etc/ssl/certs/global-bundle.pem
 
 RUN mkdir -p /home/agent/workspace /home/agent/.copilot \
     && printf '%s\n' \

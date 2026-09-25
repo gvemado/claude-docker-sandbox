@@ -4,9 +4,9 @@ set -euo pipefail
 
 show_help() {
   cat <<'EOF'
-Usage: copilot-yolo-sandbox [--branch <name>] [--rebuild] [-- copilot args...]
+Usage: claude-sandbox [--branch <name>] [--rebuild] [-- claude args...]
 
-Starts GitHub Copilot CLI in a Docker sandbox backed by a host-side git worktree.
+Starts Claude Code in a Docker sandbox backed by a host-side git worktree.
 
 Options:
   -b, --branch <name>  Branch to open in the sandbox worktree
@@ -14,9 +14,9 @@ Options:
   -h, --help           Show this help text
 
 Examples:
-  copilot-yolo-sandbox
-  copilot-yolo-sandbox --branch feature/refactor
-  copilot-yolo-sandbox --branch fix/login -- --continue
+  claude-sandbox
+  claude-sandbox --branch feature/refactor
+  claude-sandbox --branch fix/login -- --continue
 EOF
 }
 
@@ -83,14 +83,14 @@ script_dir="$(
   pwd
 )"
 dockerfile_path="$script_dir/Dockerfile"
-entrypoint_path="$script_dir/container-entrypoint.sh"
+entrypoint_path="$script_dir/claude-sandbox-entrypoint.sh"
 project_dir="$PWD"
 
-branch="${COPILOT_SANDBOX_BRANCH:-}"
+branch="${CLAUDE_SANDBOX_BRANCH:-}"
 rebuild=0
-copilot_args=()
+claude_args=()
 managed_worktree_path=""
-container_label_key="com.copilot-sandbox.worktree-path"
+container_label_key="com.claude-sandbox.worktree-path"
 
 trap cleanup_worktree EXIT
 
@@ -114,11 +114,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --)
       shift
-      copilot_args+=("$@")
+      claude_args+=("$@")
       break
       ;;
     *)
-      copilot_args+=("$1")
+      claude_args+=("$1")
       shift
       ;;
   esac
@@ -144,7 +144,7 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$HOME/.copilot"
+mkdir -p "$HOME/.claude"
 
 if ! current_worktree_root="$(git -C "$project_dir" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)"; then
   echo "Run this script from inside a git repository." >&2
@@ -223,7 +223,7 @@ repo_key="$(hash_string "$git_common_dir")"
 repo_slug="$(slugify "$(basename "$repo_label_root")")"
 branch_key="$(hash_string "$branch")"
 branch_slug="$(slugify "$branch")"
-worktree_root="${COPILOT_SANDBOX_WORKTREE_ROOT:-$HOME/.local/share/copilot-yolo/worktrees}"
+worktree_root="${CLAUDE_SANDBOX_WORKTREE_ROOT:-$HOME/.local/share/claude-sandbox/worktrees}"
 worktree_path="${worktree_root}/${repo_slug}-${repo_key}/${branch_slug}-${branch_key}"
 
 if existing_worktree="$(find_existing_worktree_for_branch "refs/heads/$branch")"; then
@@ -276,38 +276,38 @@ fi
 image_inputs_hash="$(
   hash_string "$(hash_file "$dockerfile_path") $(hash_file "$entrypoint_path")"
 )"
-image_tag="${COPILOT_SANDBOX_IMAGE:-copilot-yolo-base:${image_inputs_hash}}"
+image_tag="${CLAUDE_SANDBOX_IMAGE:-claude-sandbox:${image_inputs_hash}}"
 
 if [[ "$rebuild" -eq 1 ]] || ! docker image inspect "$image_tag" >/dev/null 2>&1; then
   echo "Building sandbox image $image_tag..."
   docker build -f "$dockerfile_path" -t "$image_tag" "$script_dir"
 fi
 
-echo "Starting Copilot in yolo mode for branch $branch..."
+echo "Starting Claude Code with permission prompts disabled for branch $branch..."
 docker_run_args=(
   --rm
   --init
   --label "${container_label_key}=${worktree_path}"
   --workdir "$container_workdir"
   -e "TERM=${TERM:-xterm-256color}"
-  -v "$HOME/.copilot:/home/agent/.copilot"
+  -v "$HOME/.claude:/home/agent/.claude"
   -v "$worktree_path:$worktree_path"
   -v "$git_common_dir:$git_common_dir"
 )
 
 if [[ -d "$HOME/.ssh" ]]; then
-  docker_run_args+=(-v "$HOME/.ssh:/run/copilot-host-ssh:ro")
+  docker_run_args+=(-v "$HOME/.ssh:/run/claude-sandbox-host-ssh:ro")
 fi
 
 if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
   docker_run_args+=(
-    -e "COPILOT_HOST_SSH_AUTH_SOCK=/run/copilot-host-ssh-agent.sock"
-    -v "${SSH_AUTH_SOCK}:/run/copilot-host-ssh-agent.sock"
+    -e "CLAUDE_SANDBOX_HOST_SSH_AUTH_SOCK=/run/claude-sandbox-host-ssh-agent.sock"
+    -v "${SSH_AUTH_SOCK}:/run/claude-sandbox-host-ssh-agent.sock"
   )
 fi
 
 if [[ -d "$HOME/.gnupg" ]]; then
-  docker_run_args+=(-v "$HOME/.gnupg:/run/copilot-host-gnupg:ro")
+  docker_run_args+=(-v "$HOME/.gnupg:/run/claude-sandbox-host-gnupg:ro")
 fi
 
 if [[ -t 0 && -t 1 ]]; then
@@ -316,15 +316,22 @@ else
   docker_run_args=(-i "${docker_run_args[@]}")
 fi
 
-copilot_cmd=(copilot --yolo)
-if ((${#copilot_args[@]})); then
-  copilot_cmd+=("${copilot_args[@]}")
+if [[ -f "$HOME/.claude.json" ]]; then
+  docker_run_args+=(-v "$HOME/.claude.json:/home/agent/.claude.json")
 fi
+
+claude_cmd=(claude)
+if ((${#claude_args[@]})); then
+  claude_cmd+=("${claude_args[@]}")
+fi
+
+# Keep this last: a forwarded --permission-mode option cannot re-enable prompts.
+claude_cmd+=(--dangerously-skip-permissions)
 
 set +e
 docker run "${docker_run_args[@]}" \
   "$image_tag" \
-  "${copilot_cmd[@]}"
+  "${claude_cmd[@]}"
 run_status=$?
 set -e
 

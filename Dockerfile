@@ -2,7 +2,7 @@ FROM docker/sandbox-templates:copilot
 
 USER root
 
-COPY container-entrypoint.sh /usr/local/bin/copilot-sandbox-entrypoint
+COPY claude-sandbox-entrypoint.sh /usr/local/bin/claude-sandbox-entrypoint
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -21,26 +21,32 @@ RUN mkdir -p /tmp/mysql-mcp \
     && /usr/local/bin/mysql-mcp-server --version
 
 # Install AWS DocumentDB MCP server
-# Install AWS DocumentDB MCP server
 
 USER agent
 RUN uv tool install 'awslabs.documentdb-mcp-server>=1.0.12' \
     && /home/agent/.local/bin/awslabs.documentdb-mcp-server --help
+
+# Install Claude Code as the unprivileged runtime user.  Its configuration and
+# credentials are supplied at runtime through the host's ~/.claude directory.
+RUN npm install -g @anthropic-ai/claude-code \
+    && claude --version
 USER root
 
 # AWS DocumentDB TLS certificate
 COPY packages/global-bundle.pem /etc/ssl/certs/global-bundle.pem
 RUN chmod 644 /etc/ssl/certs/global-bundle.pem
 
-RUN mkdir -p /home/agent/workspace /home/agent/.copilot \
+RUN mkdir -p /home/agent/workspace /home/agent/.claude \
     && printf '%s\n' \
         '#!/bin/sh' \
         'exec /usr/local/bin/uv tool run "$@"' \
         > /usr/local/bin/uvx \
-    && chmod +x /usr/local/bin/uvx /usr/local/bin/copilot-sandbox-entrypoint \
+    && chmod +x /usr/local/bin/uvx /usr/local/bin/claude-sandbox-entrypoint \
     && chown -R agent:agent /home/agent
+
+ENV PATH="/home/agent/.local/bin:/usr/local/share/npm-global/bin:${PATH}"
 
 WORKDIR /home/agent/workspace
 
-ENTRYPOINT ["/usr/local/bin/copilot-sandbox-entrypoint"]
-CMD ["copilot"]
+ENTRYPOINT ["/usr/local/bin/claude-sandbox-entrypoint"]
+CMD ["claude", "--dangerously-skip-permissions"]

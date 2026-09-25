@@ -2,9 +2,9 @@
 
 set -eu
 
-host_ssh_dir=/run/copilot-host-ssh
-host_gnupg_dir=/run/copilot-host-gnupg
-host_ssh_agent_sock="${COPILOT_HOST_SSH_AUTH_SOCK:-}"
+host_ssh_dir=/run/claude-sandbox-host-ssh
+host_gnupg_dir=/run/claude-sandbox-host-gnupg
+host_ssh_agent_sock="${CLAUDE_SANDBOX_HOST_SSH_AUTH_SOCK:-}"
 target_home=/home/agent
 target_ssh_dir="$target_home/.ssh"
 target_gnupg_dir="$target_home/.gnupg"
